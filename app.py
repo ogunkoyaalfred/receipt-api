@@ -18,7 +18,11 @@ if _tess and os.path.exists(_tess):
     pytesseract.pytesseract.tesseract_cmd = _tess
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:5173",        # local dev
+    "https://your-app.vercel.app",  # your deployed React app
+    "*"                             # fallback — allow all (you can restrict later)
+])
 
 # Valid categories in your expense tracker
 VALID_CATEGORIES = ["Food", "Transport", "Bills", "Entertainment", "Borrow", "Other"]
