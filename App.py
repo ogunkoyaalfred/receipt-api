@@ -10,15 +10,18 @@ import os
 
 # Auto-detect Tesseract — works on Linux (Railway) and Windows
 _tess = (
-    shutil.which("tesseract")                                      # works if it's in PATH
-    or r"C:\Program Files\Tesseract-OCR\tesseract.exe"            # Windows default install
-    or r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"      # Windows 32-bit fallback
+    shutil.which("tesseract")
+    or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    or r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
 )
 if _tess and os.path.exists(_tess):
     pytesseract.pytesseract.tesseract_cmd = _tess
 
 app = Flask(__name__)
 CORS(app)
+
+# Valid categories in your expense tracker
+VALID_CATEGORIES = ["Food", "Transport", "Bills", "Entertainment", "Borrow", "Other"]
 
 # OCR month misread corrections
 OCR_MONTH_FIXES = {
@@ -40,6 +43,39 @@ def fix_ocr_month(text):
     for wrong, correct in OCR_MONTH_FIXES.items():
         text = re.sub(rf'\b{re.escape(wrong)}\b', correct, text, flags=re.IGNORECASE)
     return text
+
+
+def parse_narration(narration):
+    """
+    Splits narration in the format "Category - Title" into separate fields.
+    e.g. "Transport - Uber ride"  ->  category="Transport", title="Uber ride"
+    e.g. "food-lunch at shoprite" ->  category="Food",      title="lunch at shoprite"
+    e.g. "Bought groceries"       ->  category=None,        title="Bought groceries"
+    """
+    if not narration:
+        return None, None
+
+    # Match "Category - Title" or "Category: Title" (case-insensitive, flexible spacing)
+    split_match = re.match(r'^([^:\-]+?)\s*[-:]\s*(.+)$', narration.strip())
+
+    if split_match:
+        raw_category = split_match.group(1).strip()
+        title        = split_match.group(2).strip()
+
+        # Check if the left side matches a known category (case-insensitive)
+        matched_category = next(
+            (c for c in VALID_CATEGORIES if c.lower() == raw_category.lower()),
+            None
+        )
+
+        if matched_category:
+            return matched_category, title
+        else:
+            # Left side isn't a valid category — treat full narration as title
+            return None, narration.strip()
+    else:
+        # No separator found — full narration is the title
+        return None, narration.strip()
 
 
 def parse_receipt_from_image(image_bytes):
@@ -135,10 +171,15 @@ def parse_receipt_from_image(image_bytes):
                     ):
                         narration = nxt
 
+    # Split narration into category + title
+    category, title = parse_narration(narration)
+
     return {
         "amount":           amount,
         "transaction_date": transaction_date,
         "narration":        narration or None,
+        "title":            title,       # e.g. "Uber ride"
+        "category":         category,    # e.g. "Transport" or null
     }
 
 
