@@ -15,7 +15,7 @@ try:
 except ImportError:
     pass  # pillow-heif not installed — HEIC images won't be supported
 
-# Auto-detect Tesseract — works on Linux (Railway) and Windows
+# Auto-detect Tesseract — works on Linux (Render/Railway) and Windows
 _tess = (
     shutil.which("tesseract")
     or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -59,11 +59,41 @@ OCR_MONTH_FIXES = {
     "Decmber": "December", "Deceber": "December",
 }
 
+# Maximum image dimension (width or height) before downscaling.
+# 1800px is plenty for Tesseract to read receipt text clearly.
+MAX_IMAGE_DIM = 1800
+
 
 def fix_ocr_month(text):
     for wrong, correct in OCR_MONTH_FIXES.items():
         text = re.sub(rf'\b{re.escape(wrong)}\b', correct, text, flags=re.IGNORECASE)
     return text
+
+
+def preprocess_image(image_bytes):
+    """
+    Safely prepare an image for Tesseract OCR:
+      1. Open from bytes
+      2. Fix EXIF rotation (critical for iPhone photos)
+      3. Downscale if too large (prevents OOM on free-tier servers)
+      4. Convert to greyscale (reduces memory + improves OCR accuracy)
+    """
+    image = Image.open(io.BytesIO(image_bytes))
+
+    # Fix EXIF rotation — iPhones embed rotation metadata that PIL ignores
+    image = ImageOps.exif_transpose(image)
+
+    # Downscale large images to prevent out-of-memory crashes.
+    # thumbnail() preserves aspect ratio and never upscales.
+    if image.width > MAX_IMAGE_DIM or image.height > MAX_IMAGE_DIM:
+        print(f"Resizing image from {image.width}x{image.height}")
+        image.thumbnail((MAX_IMAGE_DIM, MAX_IMAGE_DIM), Image.LANCZOS)
+        print(f"Resized to {image.width}x{image.height}")
+
+    # Convert to greyscale — halves memory vs RGB, and Tesseract reads it better
+    image = image.convert("L")
+
+    return image
 
 
 def parse_narration(narration):
@@ -76,14 +106,12 @@ def parse_narration(narration):
     if not narration:
         return None, None
 
-    # Match "Category - Title" or "Category: Title" (case-insensitive, flexible spacing)
     split_match = re.match(r'^([^:\-]+?)\s*[-:]\s*(.+)$', narration.strip())
 
     if split_match:
         raw_category = split_match.group(1).strip()
         title        = split_match.group(2).strip()
 
-        # Check if the left side matches a known category (case-insensitive)
         matched_category = next(
             (c for c in VALID_CATEGORIES if c.lower() == raw_category.lower()),
             None
@@ -92,24 +120,16 @@ def parse_narration(narration):
         if matched_category:
             return matched_category, title
         else:
-            # Left side isn't a valid category — treat full narration as title
             return None, narration.strip()
     else:
-        # No separator found — full narration is the title
         return None, narration.strip()
 
 
 def parse_receipt_from_image(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes))
+    # Preprocess: rotate, resize, greyscale
+    image = preprocess_image(image_bytes)
 
-    # ✅ Fix EXIF orientation — critical for iOS (iPhones embed rotation metadata
-    # that PIL ignores by default, causing Tesseract to read a sideways image)
-    image = ImageOps.exif_transpose(image)
-
-    # ✅ Convert to RGB — avoids mode errors (e.g. RGBA, P, CMYK) with pytesseract
-    image = image.convert("RGB")
-
-    text  = pytesseract.image_to_string(image)
+    text = pytesseract.image_to_string(image)
 
     lines = [
         l.strip() for l in text.split('\n')
@@ -200,7 +220,6 @@ def parse_receipt_from_image(image_bytes):
                     ):
                         narration = nxt
 
-    # Split narration into category + title
     category, title = parse_narration(narration)
 
     return {
@@ -218,13 +237,16 @@ def parse_receipt():
         return jsonify({"error": "No image file provided"}), 400
 
     file = request.files["image"]
-
-    # Log for debugging — helpful if issues persist on specific devices
     print(f"Received file: {file.filename}, content-type: {file.content_type}")
 
     image_bytes = file.read()
     if not image_bytes:
         return jsonify({"error": "Empty file received"}), 400
+
+    # Reject files over 20MB before even trying to open them
+    size_mb = len(image_bytes) / (1024 * 1024)
+    if size_mb > 20:
+        return jsonify({"error": f"File too large ({size_mb:.1f}MB). Max is 20MB."}), 413
 
     try:
         result = parse_receipt_from_image(image_bytes)
