@@ -2,11 +2,18 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import re
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageOps
 import pytesseract
 import io
 import shutil
 import os
+
+# Register HEIC/HEIF support (required for iOS camera roll images)
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass  # pillow-heif not installed — HEIC images won't be supported
 
 # Auto-detect Tesseract — works on Linux (Railway) and Windows
 _tess = (
@@ -94,6 +101,14 @@ def parse_narration(narration):
 
 def parse_receipt_from_image(image_bytes):
     image = Image.open(io.BytesIO(image_bytes))
+
+    # ✅ Fix EXIF orientation — critical for iOS (iPhones embed rotation metadata
+    # that PIL ignores by default, causing Tesseract to read a sideways image)
+    image = ImageOps.exif_transpose(image)
+
+    # ✅ Convert to RGB — avoids mode errors (e.g. RGBA, P, CMYK) with pytesseract
+    image = image.convert("RGB")
+
     text  = pytesseract.image_to_string(image)
 
     lines = [
@@ -192,8 +207,8 @@ def parse_receipt_from_image(image_bytes):
         "amount":           amount,
         "transaction_date": transaction_date,
         "narration":        narration or None,
-        "title":            title,       # e.g. "Uber ride"
-        "category":         category,    # e.g. "Transport" or null
+        "title":            title,
+        "category":         category,
     }
 
 
@@ -202,13 +217,20 @@ def parse_receipt():
     if "image" not in request.files:
         return jsonify({"error": "No image file provided"}), 400
 
-    file        = request.files["image"]
+    file = request.files["image"]
+
+    # Log for debugging — helpful if issues persist on specific devices
+    print(f"Received file: {file.filename}, content-type: {file.content_type}")
+
     image_bytes = file.read()
+    if not image_bytes:
+        return jsonify({"error": "Empty file received"}), 400
 
     try:
         result = parse_receipt_from_image(image_bytes)
         return jsonify(result)
     except Exception as e:
+        print(f"Parse error: {e}")
         return jsonify({"error": str(e)}), 500
 
 
